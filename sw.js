@@ -1,61 +1,47 @@
-const CACHE_NAME = 'gps-desert-v1';
-const URLS_TO_CACHE = [
-  './',
-  './index.html',
-  './manifest.json',
-  './icon.png',
-  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
-  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'
-];
+const CACHE = "gps-desert-v3";
+const TILE_CACHE = "gps-tiles-v3";
 
-self.addEventListener('install', function(event){
-  event.waitUntil(
-    caches.open(CACHE_NAME).then(function(cache){
-      return cache.addAll(URLS_TO_CACHE);
-    })
-  );
+self.addEventListener("install", e => {
   self.skipWaiting();
+  e.waitUntil(caches.open(CACHE).then(c =>
+    c.addAll(["./", "./index.html", "./manifest.json", "./icon.png"])
+  ));
 });
 
-self.addEventListener('activate', function(event){
-  event.waitUntil(
-    caches.keys().then(function(names){
-      return Promise.all(
-        names.filter(function(n){ return n !== CACHE_NAME; })
-             .map(function(n){ return caches.delete(n); })
-      );
-    })
+self.addEventListener("activate", e => {
+  e.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE && k !== TILE_CACHE).map(k => caches.delete(k)))
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
-self.addEventListener('fetch', function(event){
-  const url = event.request.url;
-  
-  // APIs ما تخزن — تحتاج إنترنت
-  if (url.includes('overpass') || url.includes('photon') || url.includes('nominatim') || url.includes('ipify')){
+self.addEventListener("fetch", e => {
+  const url = new URL(e.request.url);
+
+  if (url.hostname.includes("cartocdn") || url.hostname.includes("arcgisonline")){
+    e.respondWith(
+      caches.open(TILE_CACHE).then(async cache => {
+        const cached = await cache.match(e.request);
+        if (cached) return cached;
+        try {
+          const resp = await fetch(e.request);
+          if (resp.ok) cache.put(e.request, resp.clone());
+          return resp;
+        } catch(err){
+          return new Response("", {status: 503});
+        }
+      })
+    );
     return;
   }
-  
-  event.respondWith(
-    fetch(event.request)
-      .then(function(response){
-        if (response.ok && event.request.method === 'GET'){
-          const responseClone = response.clone();
-          caches.open(CACHE_NAME).then(function(cache){
-            cache.put(event.request, responseClone);
-          });
-        }
-        return response;
-      })
-      .catch(function(){
-        return caches.match(event.request).then(function(cached){
-          if (cached) return cached;
-          if (event.request.mode === 'navigate'){
-            return caches.match('./index.html');
-          }
-          return new Response('Offline', {status: 503});
-        });
-      })
+
+  if (url.hostname.includes("nominatim") || url.hostname.includes("overpass") || url.hostname.includes("open-meteo")){
+    e.respondWith(fetch(e.request));
+    return;
+  }
+
+  e.respondWith(
+    caches.match(e.request).then(hit => hit || fetch(e.request))
   );
 });
