@@ -143,6 +143,8 @@ body{padding:10px;padding-bottom:60px}
 .moon-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0}
 .moon-row .lbl{color:#555;font-size:10px;font-weight:700;display:flex;align-items:center;gap:6px}
 .moon-row .val{color:#eab308;font-size:12px;font-weight:800}
+.cache-bar{height:8px;background:#0a0a0a;border:1px solid #1c1c1c;border-radius:4px;overflow:hidden;margin-bottom:6px}
+.cache-fill{height:100%;background:linear-gradient(90deg,#2563eb,#4A9EFF);border-radius:4px;transition:width .3s;width:0%}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;padding:20px;z-index:9999}
 .modal.hidden{display:none}
 .modal-card{background:#0f0f0f;border:1px solid #2a2a2a;border-radius:12px;padding:22px;max-width:400px;width:100%}
@@ -260,6 +262,19 @@ footer b{color:#555;font-weight:800}
   </div>
 
   <div class="section">
+    <div class="section-title">📥 خرائط بدون نت</div>
+    <div id="cacheInfo" style="color:#555;font-size:10px;margin-bottom:10px;line-height:1.6">حمّل خرائط المملكة كاملة (ساتلايت) وأنت على واي فاي — بعدين تشتغل بالبر بدون إنترنت<br><b style="color:#4A9EFF">~200MB · 5-10 دقائق</b></div>
+    <div id="cacheProgressWrap" style="display:none;margin-bottom:10px">
+      <div class="cache-bar"><div class="cache-fill" id="cacheFill"></div></div>
+      <div id="cacheText" style="text-align:center;font-size:10px;color:#4A9EFF;font-weight:700">0%</div>
+    </div>
+    <div class="btn-row">
+      <button type="button" class="btn blue" id="btnPreCache">📥 تحميل المملكة</button>
+      <button type="button" class="btn gray" id="btnClearTiles">🗑️ مسح الكاش</button>
+    </div>
+  </div>
+
+  <div class="section">
     <div class="section-title">🅿️ موقع السيارة</div>
     <div id="carInfo" style="color:#444;font-size:11px;text-align:center;padding:8px;margin-bottom:10px">ما فيه سيارة محفوظة</div>
     <button type="button" class="btn orange" id="btnParkHere">🅿️ أركن هنا</button>
@@ -373,7 +388,8 @@ footer b{color:#555;font-weight:800}
     qiblaBearing: null,
     weatherFetched: false,
     isSatellite: false,
-    darkLayer: null, satLayer: null
+    darkLayer: null, satLayer: null,
+    cacheCancelled: false
   };
 
   function $(id){ return document.getElementById(id); }
@@ -576,7 +592,7 @@ footer b{color:#555;font-weight:800}
     if (typeof L === "undefined") return;
     state.map = L.map("map", {zoomControl:false, attributionControl:false, preferCanvas:true}).setView([24.7136, 46.6753], 14);
 
-    state.darkLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {maxZoom:19, subdomains:"abcd", crossOrigin:true});
+    state.darkLayer = L.tileLayer("https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", {maxZoom:19, crossOrigin:true});
     state.satLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {maxZoom:19, crossOrigin:true});
 
     if (state.isSatellite){
@@ -943,6 +959,129 @@ footer b{color:#555;font-weight:800}
       });
   }
 
+  function latToTileY(lat, z){
+    var n = Math.pow(2, z);
+    var latRad = toRad(lat);
+    return Math.floor((1 - Math.log(Math.tan(latRad) + 1/Math.cos(latRad)) / Math.PI) / 2 * n);
+  }
+
+  function lngToTileX(lng, z){
+    var n = Math.pow(2, z);
+    return Math.floor((lng + 180) / 360 * n);
+  }
+
+  function preCacheTiles(){
+    if (!navigator.onLine){ toast("تحتاج إنترنت للتحميل", "err"); return; }
+    if (!("caches" in window)){ toast("المتصفح ما يدعم الكاش", "err"); return; }
+
+    state.cacheCancelled = false;
+    $("btnPreCache").disabled = true;
+    $("btnPreCache").textContent = "⏳ جاري التحميل...";
+    $("cacheProgressWrap").style.display = "block";
+    $("cacheInfo").innerHTML = "⏳ جاري تحميل خرائط المملكة...<br>لا تسكر الصفحة";
+
+    var minLat = 15.5, maxLat = 32.5, minLng = 34.0, maxLng = 56.5;
+    var zooms = [10, 11];
+    var tiles = [];
+
+    zooms.forEach(function(z){
+      var x1 = lngToTileX(minLng, z);
+      var x2 = lngToTileX(maxLng, z);
+      var y1 = latToTileY(maxLat, z);
+      var y2 = latToTileY(minLat, z);
+      for (var x = x1; x <= x2; x++){
+        for (var y = y1; y <= y2; y++){
+          tiles.push(z + "/" + y + "/" + x);
+        }
+      }
+    });
+
+    var total = tiles.length;
+    var done = 0;
+    var failed = 0;
+    var batchSize = 40;
+
+    function updateProgress(){
+      var pct = Math.round(done / total * 100);
+      $("cacheFill").style.width = pct + "%";
+      var mb = Math.round(done * 12 / 1024);
+      $("cacheText").textContent = pct + "% — " + done + "/" + total + " بلاطة (~" + mb + "MB)";
+    }
+
+    function cacheBatch(){
+      if (state.cacheCancelled) return;
+      var batch = tiles.slice(done, done + batchSize);
+      var promises = batch.map(function(tileStr){
+        var parts = tileStr.split("/");
+        var url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/" + parts[0] + "/" + parts[1] + "/" + parts[2];
+        return fetch(url).then(function(resp){
+          if (resp.ok){
+            return caches.open("gps-tiles-v3").then(function(c){
+              return c.put(url, resp);
+            });
+          }
+          done++;
+        }).then(function(){
+          done++;
+        }).catch(function(){
+          done++;
+          failed++;
+        });
+      });
+
+      Promise.all(promises).then(function(){
+        updateProgress();
+        if (state.cacheCancelled){
+          $("cacheInfo").innerHTML = "⏸️ تم إيقاف التحميل عند " + done + " بلاطة<br>اضغط زر التحميل للتكملة";
+          $("btnPreCache").disabled = false;
+          $("btnPreCache").textContent = "📥 تكملة التحميل";
+          return;
+        }
+        if (done < total){
+          setTimeout(cacheBatch, 30);
+        } else {
+          localStorage.setItem("gd_precache_done", "1");
+          $("btnPreCache").disabled = false;
+          $("btnPreCache").textContent = "📥 تحميل المملكة";
+          $("cacheInfo").innerHTML = "✅ <b style='color:#22c55e'>" + done + " بلاطة محفوظة</b><br>المملكة كلها جاهزة بدون نت 🔥";
+          $("cacheProgressWrap").style.display = "none";
+          toast("✅ خرائط المملكة جاهزة للبر!");
+          beep(1500, 500);
+          vibrate([200, 100, 200, 100, 200]);
+        }
+      });
+    }
+
+    cacheBatch();
+  }
+
+  function clearTileCache(){
+    if (!confirm("مسح كل خرائط الكاش؟ (حتاج تعيد التحميل)")) return;
+    if ("caches" in window){
+      caches.delete("gps-tiles-v3").then(function(){
+        localStorage.removeItem("gd_precache_done");
+        $("cacheInfo").innerHTML = "حمّل خرائط المملكة كاملة (ساتلايت) وأنت على واي فاي — بعدين تشتغل بالبر بدون إنترنت<br><b style='color:#4A9EFF'>~200MB · 5-10 دقائق</b>";
+        $("cacheFill").style.width = "0%";
+        $("cacheProgressWrap").style.display = "none";
+        toast("🗑️ تم مسح الكاش");
+      });
+    }
+  }
+
+  function checkCacheStatus(){
+    if (!("caches" in window)) return;
+    localStorage.getItem("gd_precache_done");
+    if (localStorage.getItem("gd_precache_done") === "1"){
+      caches.open("gps-tiles-v3").then(function(cache){
+        return cache.keys();
+      }).then(function(keys){
+        if (keys.length > 100){
+          $("cacheInfo").innerHTML = "✅ <b style='color:#22c55e'>" + keys.length + " بلاطة محفوظة</b><br>المملكة جاهزة بدون نت 🔥";
+        }
+      }).catch(function(){});
+    }
+  }
+
   function findPOI(){
     var lat, lng, aroundName;
     if (state.target){
@@ -1233,6 +1372,8 @@ footer b{color:#555;font-weight:800}
 
   $("btnSatellite").addEventListener("click", toggleSatellite);
   $("btnFindPOI").addEventListener("click", findPOI);
+  $("btnPreCache").addEventListener("click", preCacheTiles);
+  $("btnClearTiles").addEventListener("click", clearTileCache);
 
   $("btnAddTarget").addEventListener("click", function(){
     var name = $("targetName").value.trim() || "هدف " + (state.targets.length + 1);
@@ -1379,6 +1520,7 @@ footer b{color:#555;font-weight:800}
   updateTrailOnMap();
   updatePoiAroundText();
   updateBattery();
+  checkCacheStatus();
 
   var cityShown = false;
   var cityCheckInterval = setInterval(function(){
