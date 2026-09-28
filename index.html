@@ -214,7 +214,7 @@ footer b{color:#555;font-weight:800}
 
   <div class="section">
     <div class="section-title">محطات البنزين القريبة</div>
-    <div style="color:#555;font-size:10px;margin-bottom:12px">النطاق: <b style="color:#ca8a04">30 KM</b> — حول <b id="poiAround" style="color:#FE2C55">موقعك</b></div>
+    <div style="color:#555;font-size:10px;margin-bottom:12px">النطاق: <b style="color:#ca8a04">45 KM</b> — حول <b id="poiAround" style="color:#FE2C55">موقعك</b></div>
     <button type="button" class="btn amber" id="btnFindPOI">⛽ ابحث الآن</button>
     <div class="poi-results" id="poiResults"></div>
   </div>
@@ -282,7 +282,8 @@ footer b{color:#555;font-weight:800}
     map: null, myMarker: null, targetMarker: null,
     poiMarkers: [],
     autoFollow: true,
-    lastCityLookup: 0
+    lastCityLookup: 0,
+    accuracyHistory: []
   };
 
   function $(id){ return document.getElementById(id); }
@@ -466,16 +467,32 @@ footer b{color:#555;font-weight:800}
     state.targetMarker = L.marker([state.target.lat, state.target.lng], {icon:icon}).addTo(state.map);
   }
 
-  function acceptSample(newLat, newLng, newTime){
+  function acceptSample(newLat, newLng, newAcc, newTime){
+    if (newAcc != null && newAcc > 60) return false;
+
     if (state.smoothLat == null){
-      state.smoothLat = newLat; state.smoothLng = newLng; state.lastAcceptTime = newTime;
+      state.smoothLat = newLat;
+      state.smoothLng = newLng;
+      state.lastAcceptTime = newTime;
       return true;
     }
+
     var d = haversine(state.smoothLat, state.smoothLng, newLat, newLng);
     var dt = (newTime - state.lastAcceptTime) / 1000;
-    if (d < 3 && dt < 5) return false;
+
+    if (d < 2 && dt < 4) return false;
     if (dt > 0 && (d / dt) > 55) return false;
-    var weight = Math.min(0.7, d / 20);
+
+    var accFactor = 1.0;
+    if (newAcc != null){
+      if (newAcc <= 10) accFactor = 1.0;
+      else if (newAcc <= 20) accFactor = 0.7;
+      else if (newAcc <= 35) accFactor = 0.4;
+      else accFactor = 0.25;
+    }
+
+    var weight = Math.min(0.5, (d / 25) * accFactor);
+
     state.smoothLat = state.smoothLat * (1 - weight) + newLat * weight;
     state.smoothLng = state.smoothLng * (1 - weight) + newLng * weight;
     state.lastAcceptTime = newTime;
@@ -490,10 +507,19 @@ footer b{color:#555;font-weight:800}
       function(pos){
         var c = pos.coords;
         var now = pos.timestamp || Date.now();
-        state.currentAcc = c.accuracy != null ? Math.round(c.accuracy) : null;
+        var rawAcc = c.accuracy != null ? Math.round(c.accuracy) : null;
+
+        if (rawAcc != null){
+          state.accuracyHistory.push(rawAcc);
+          if (state.accuracyHistory.length > 5) state.accuracyHistory.shift();
+          var sum = 0;
+          for (var i = 0; i < state.accuracyHistory.length; i++) sum += state.accuracyHistory[i];
+          state.currentAcc = Math.round(sum / state.accuracyHistory.length);
+        }
+
         state.currentAlt = c.altitude != null ? Math.round(c.altitude) : null;
 
-        var accepted = acceptSample(c.latitude, c.longitude, now);
+        var accepted = acceptSample(c.latitude, c.longitude, rawAcc, now);
         if (accepted){
           var dt = (now - state.lastGPSTime) / 1000;
           if (dt > 0 && dt < 30){
@@ -506,11 +532,11 @@ footer b{color:#555;font-weight:800}
         }
         if (c.heading != null && !isNaN(c.heading) && state.currentSpeed > 3) state.gpsHeading = c.heading;
 
-        if (state.currentAcc > 30){
+        if (state.currentAcc > 35){
           $("gpsWarn").classList.add("active");
           $("gpsWarnText").textContent = "⚠️ الدقة ±" + state.currentAcc + "م — ضعيفة";
           setStatus("±" + state.currentAcc + "م ضعيفة", "orange");
-        } else if (state.currentAcc > 15){
+        } else if (state.currentAcc > 20){
           $("gpsWarn").classList.add("active");
           $("gpsWarnText").textContent = "⚠️ الدقة ±" + state.currentAcc + "م — مقبولة";
           setStatus("±" + state.currentAcc + "م", "green");
@@ -615,7 +641,6 @@ footer b{color:#555;font-weight:800}
     }
   }
 
-  // ⭐ محطات بنزين — 3 محطات — Overpass فقط — أسرع وأوثق
   function findPOI(){
     var lat, lng, aroundName;
     if (state.target){
@@ -638,11 +663,9 @@ footer b{color:#555;font-weight:800}
     state.poiMarkers.forEach(function(m){ if (state.map) state.map.removeLayer(m); });
     state.poiMarkers = [];
 
-    var radius = 30000;
+    var radius = 45000;
     var allPlaces = [];
     var responded = false;
-    var serversResponded = 0;
-    var serversFailed = 0;
 
     var timeoutHandle = setTimeout(function(){
       if (!responded){
@@ -650,7 +673,7 @@ footer b{color:#555;font-weight:800}
         if (allPlaces.length > 0) processResults(allPlaces, lat, lng, aroundName, el);
         else finalizeEmpty(el, aroundName);
       }
-    }, 12000);
+    }, 15000);
 
     function addPlaces(newPlaces){
       newPlaces.forEach(function(p){
@@ -707,97 +730,80 @@ footer b{color:#555;font-weight:800}
     function finalizeEmpty(el, aroundName){
       $("btnFindPOI").disabled = false;
       $("btnFindPOI").textContent = "⛽ ابحث الآن";
-      el.innerHTML = '<div class="poi-empty">❌ ما لقيت محطات في نطاق 30 كم</div>';
+      el.innerHTML = '<div class="poi-empty">❌ ما لقيت محطات في نطاق 45 كم<br><span style="font-size:10px;color:#555">جرّب بعد دقيقة</span></div>';
     }
 
-    function handleServerSuccess(places){
-      serversResponded++;
-      addPlaces(places);
-      if (places.length >= 3 && !responded){
-        responded = true;
-        clearTimeout(timeoutHandle);
-        processResults(allPlaces, lat, lng, aroundName, el);
-        return true;
-      }
-      if (serversResponded >= 2 && !responded){
-        responded = true;
-        clearTimeout(timeoutHandle);
-        if (allPlaces.length > 0) processResults(allPlaces, lat, lng, aroundName, el);
-        else finalizeEmpty(el, aroundName);
-        return true;
-      }
-      return false;
+    function overpassQuery(){
+      return '[out:json][timeout:30];(node["amenity"="fuel"](around:' + radius + ',' + lat + ',' + lng + ');way["amenity"="fuel"](around:' + radius + ',' + lat + ',' + lng + '););out center 50;';
     }
 
-    function handleServerFailure(){
-      serversFailed++;
-      if (serversFailed >= 2 && !responded){
-        responded = true;
-        clearTimeout(timeoutHandle);
-        if (allPlaces.length > 0) processResults(allPlaces, lat, lng, aroundName, el);
-        else finalizeEmpty(el, aroundName);
-      }
-    }
+    var servers = [
+      { name: "kumi", url: "https://overpass.kumi.systems/api/interpreter?data=" + encodeURIComponent(overpassQuery()), timeout: 10000 },
+      { name: "main", url: "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(overpassQuery()), timeout: 10000 },
+      { name: "coffee", url: "https://overpass.private.coffee/api/interpreter?data=" + encodeURIComponent(overpassQuery()), timeout: 10000 },
+      { name: "osm-ch", url: "https://overpass.osm.ch/api/interpreter?data=" + encodeURIComponent(overpassQuery()), timeout: 10000 },
+      { name: "fr", url: "https://overpass.openstreetmap.fr/api/interpreter?data=" + encodeURIComponent(overpassQuery()), timeout: 10000 }
+    ];
 
-    var kumiUrl = "https://overpass.kumi.systems/api/interpreter?data=" + encodeURIComponent(
-      '[out:json][timeout:20];(node["amenity"="fuel"](around:' + radius + ',' + lat + ',' + lng + ');way["amenity"="fuel"](around:' + radius + ',' + lat + ',' + lng + '););out center 30;'
-    );
+    var serversResponded = 0;
+    var serversFailed = 0;
+    var respondedFromAny = false;
 
-    var kumiController = new AbortController();
-    var kumiTimer = setTimeout(function(){ kumiController.abort(); }, 10000);
-
-    fetch(kumiUrl, { signal: kumiController.signal })
-      .then(function(r){ clearTimeout(kumiTimer); return r.json(); })
-      .then(function(j){
-        if (responded) return;
-        var places = [];
-        if (j && j.elements){
-          j.elements.forEach(function(e){
-            var plat = e.lat || (e.center && e.center.lat);
-            var plng = e.lon || (e.center && e.center.lon);
-            if (!plat || !plng) return;
-            var d = haversine(lat, lng, plat, plng);
-            if (d > radius) return;
-            var name = (e.tags && (e.tags.name || e.tags.name_ar || e.tags["name:ar"] || e.tags.brand)) || "محطة بنزين";
-            places.push({ lat: plat, lng: plng, name: name, dist: d });
-          });
+    function checkAllDone(){
+      if ((serversResponded + serversFailed) >= servers.length && !respondedFromAny){
+        respondedFromAny = true;
+        if (!responded){
+          responded = true;
+          clearTimeout(timeoutHandle);
+          if (allPlaces.length > 0) processResults(allPlaces, lat, lng, aroundName, el);
+          else finalizeEmpty(el, aroundName);
         }
-        handleServerSuccess(places);
-      })
-      .catch(function(){
-        clearTimeout(kumiTimer);
-        handleServerFailure();
-      });
+      }
+    }
 
-    var mainUrl = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(
-      '[out:json][timeout:20];(node["amenity"="fuel"](around:' + radius + ',' + lat + ',' + lng + ');way["amenity"="fuel"](around:' + radius + ',' + lat + ',' + lng + '););out center 30;'
-    );
+    function parseElements(j){
+      var places = [];
+      if (j && j.elements){
+        j.elements.forEach(function(e){
+          var plat = e.lat || (e.center && e.center.lat);
+          var plng = e.lon || (e.center && e.center.lon);
+          if (!plat || !plng) return;
+          var d = haversine(lat, lng, plat, plng);
+          if (d > radius) return;
+          var name = (e.tags && (e.tags.name || e.tags.name_ar || e.tags["name:ar"] || e.tags.brand)) || "محطة بنزين";
+          places.push({ lat: plat, lng: plng, name: name, dist: d });
+        });
+      }
+      return places;
+    }
 
-    var mainController = new AbortController();
-    var mainTimer = setTimeout(function(){ mainController.abort(); }, 11000);
+    servers.forEach(function(server){
+      var controller = new AbortController();
+      var timer = setTimeout(function(){ controller.abort(); }, server.timeout);
 
-    fetch(mainUrl, { signal: mainController.signal })
-      .then(function(r){ clearTimeout(mainTimer); return r.json(); })
-      .then(function(j){
-        if (responded) return;
-        var places = [];
-        if (j && j.elements){
-          j.elements.forEach(function(e){
-            var plat = e.lat || (e.center && e.center.lat);
-            var plng = e.lon || (e.center && e.center.lon);
-            if (!plat || !plng) return;
-            var d = haversine(lat, lng, plat, plng);
-            if (d > radius) return;
-            var name = (e.tags && (e.tags.name || e.tags.name_ar || e.tags["name:ar"] || e.tags.brand)) || "محطة بنزين";
-            places.push({ lat: plat, lng: plng, name: name, dist: d });
-          });
-        }
-        handleServerSuccess(places);
-      })
-      .catch(function(){
-        clearTimeout(mainTimer);
-        handleServerFailure();
-      });
+      fetch(server.url, { signal: controller.signal })
+        .then(function(r){ clearTimeout(timer); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function(j){
+          serversResponded++;
+          if (responded) return;
+          var places = parseElements(j);
+          addPlaces(places);
+
+          if (places.length >= 3 && !respondedFromAny){
+            respondedFromAny = true;
+            responded = true;
+            clearTimeout(timeoutHandle);
+            processResults(allPlaces, lat, lng, aroundName, el);
+            return;
+          }
+          checkAllDone();
+        })
+        .catch(function(){
+          clearTimeout(timer);
+          serversFailed++;
+          checkAllDone();
+        });
+    });
   }
 
   function addTarget(name, lat, lng){
